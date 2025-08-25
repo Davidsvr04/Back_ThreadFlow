@@ -1,46 +1,51 @@
 const express = require('express');
+const app = express();
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const path = require('path');
 const { config, validateConfig } = require('./config');
 const { testConnection } = require('./database/connection');
-
-// Crear aplicación Express
-const app = express();
+// Importar rutas de módulos
+const inventoryRoutes = require('./modules/inventory/routes');
 
 // Validar configuración al inicio
 try {
   validateConfig();
 } catch (error) {
-  console.error(error.message);
+  console.error('Error de configuración:', error.message);
   process.exit(1);
 }
+
+// Configurar proxy para Azure Web Apps o servidores proxy
+app.set('trust proxy', 1);
+
+// CORS
+app.use(cors({
+  origin: config.server.corsOrigin,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Origin', 'X-Requested-With', 'Accept'],
+}));
 
 // Middlewares de seguridad y logging
 app.use(helmet());
 app.use(morgan('combined'));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Configurar CORS
-app.use(cors({
-  origin: config.server.corsOrigin,
-  credentials: true
-}));
-
-// Middlewares para parsing
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-
-// Ruta de health check
+// ========== RUTAS DE SISTEMA ==========
+// Health check
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'OK',
     message: 'ThreadFlow Backend está funcionando',
     timestamp: new Date().toISOString(),
-    environment: config.server.env
+    environment: config.server.env,
+    version: '1.0.0'
   });
 });
-
-// Ruta para probar conexión a BD
+// Estado de la base de datos
 app.get('/db-status', async (req, res) => {
   try {
     const isConnected = await testConnection();
@@ -59,72 +64,47 @@ app.get('/db-status', async (req, res) => {
   }
 });
 
-// Rutas principales (se agregarán después)
-app.use('/api/v1', (req, res) => {
-  res.json({
-    message: 'API ThreadFlow v1.0',
-    endpoints: {
-      inventory: '/api/v1/inventory',
-      quotations: '/api/v1/quotations',
-      manufacturers: '/api/v1/manufacturers'
-    }
-  });
-});
+// ========== RUTAS DE LA API ==========
+// Módulo de inventario
+app.use('/api/inventory', inventoryRoutes);
+
+// ========== MIDDLEWARE DE MANEJO DE ERRORES ==========
 
 // Middleware para rutas no encontradas
 app.use('*', (req, res) => {
   res.status(404).json({
     status: 'ERROR',
     message: 'Ruta no encontrada',
-    path: req.originalUrl
+    path: req.originalUrl,
+    availableEndpoints: [
+      '/health',
+      '/db-status',
+      '/api/v1',
+      '/api/v1/inventory'
+    ]
   });
 });
 
 // Middleware global de manejo de errores
 app.use((err, req, res, next) => {
   console.error('❌ Error:', err);
-  res.status(err.status || 500).json({
+  
+  // Determinar el código de estado
+  const statusCode = err.status || err.statusCode || 500;
+  
+  // Respuesta base
+  const errorResponse = {
     status: 'ERROR',
     message: err.message || 'Error interno del servidor',
-    ...(config.server.env === 'development' && { stack: err.stack })
-  });
-});
+    timestamp: new Date().toISOString()
+  };
 
-// Función para iniciar el servidor
-const startServer = async () => {
-  try {
-    // Probar conexión a la base de datos
-    const dbConnected = await testConnection();
-    
-    if (!dbConnected) {
-      console.error('❌ No se pudo conectar a la base de datos');
-      process.exit(1);
-    }
-
-    // Iniciar servidor
-    app.listen(config.server.port, () => {
-      console.log('🚀 Servidor iniciado exitosamente');
-      console.log(`📡 Puerto: ${config.server.port}`);
-      console.log(`🌍 Entorno: ${config.server.env}`);
-      console.log(`🔗 Health check: http://localhost:${config.server.port}/health`);
-      console.log(`📊 DB Status: http://localhost:${config.server.port}/db-status`);
-    });
-
-  } catch (error) {
-    console.error('❌ Error al iniciar el servidor:', error);
-    process.exit(1);
+  // Agregar stack trace solo en desarrollo
+  if (config.server.env === 'development') {
+    errorResponse.stack = err.stack;
   }
-};
 
-// Manejo de cierre graceful
-process.on('SIGTERM', () => {
-  console.log('🔄 Cerrando servidor...');
-  process.exit(0);
+  res.status(statusCode).json(errorResponse);
 });
 
-process.on('SIGINT', () => {
-  console.log('🔄 Cerrando servidor...');
-  process.exit(0);
-});
-
-module.exports = { app, startServer };
+module.exports = app;
